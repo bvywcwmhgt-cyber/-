@@ -107,8 +107,7 @@ document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && !$("#modalRoo
 
 function openConfirm(title, message, confirmText, onConfirm){
   const body = document.createElement("div");
-  body.innerHTML = `<div class="small">${String(message).replaceAll("
-","<br>")}</div>`;
+  body.innerHTML = `<div class="small">${String(message).replaceAll("\n","<br>")}</div>`;
   const foot = document.createElement("div");
 
   const cancel = document.createElement("button");
