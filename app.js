@@ -14,19 +14,24 @@ const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(3
 
 function toast(msg){
   const t = $("#toast");
-  if(!t) return;
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toast._tm);
-  toast._tm = setTimeout(()=>t.classList.remove("show"), 1600);
+  toast._tm = setTimeout(()=>t.classList.remove("show"), 1500);
 }
-window.addEventListener("error", (e)=>{
-  // visible hint on mobile if JS breaks
-  toast("エラーが発生しました（更新/キャッシュを確認）");
-  console.error(e?.error || e);
-});
 
 function deepClone(obj){ return JSON.parse(JSON.stringify(obj)); }
+
+function loadState(){
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if(raw){
+    try { return JSON.parse(raw); } catch {}
+  }
+  return seedState();
+}
+function saveState(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
 
 function seedState(){
   const leagueId = uid();
@@ -39,9 +44,9 @@ function seedState(){
     "Leyton Orient","Port Vale","Rotherham","AFC Wimbledon",
     "Stevenage","Reading","Lincoln","Barnsley","Exeter","Doncaster",
     "Bolton","Wigan"
-  ].map(name => ({ id: uid(), name, logoDataUrl: "" }));
+  ].map(name => ({ id: uid(), name, logoDataUrl: "", note: "" }));
 
-  const divisions = [{ id: div1, name: "Div.1", teams }];
+  const divisions = [{ id: div1, name: "Div.1", logoDataUrl: "", teams }];
 
   const rankColorRules = {
     [div1]: [
@@ -71,21 +76,13 @@ function seedState(){
     leagues: [{
       id: leagueId,
       name: "League One",
-      logoDataUrl: "",
+      logoDataUrl: "", note: "",
       seasons: [season]
     }]
   };
 }
 
-function loadState(){
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if(raw){
-    try { return JSON.parse(raw); } catch {}
-  }
-  return seedState();
-}
 let state = loadState();
-function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 
 // ---------- Modal ----------
 function openModal(title, bodyNode, footNode){
@@ -103,10 +100,15 @@ function closeModal(){
   $("#modalRoot").classList.add("hidden");
   $("#modalRoot").setAttribute("aria-hidden", "true");
 }
+$("#modalBack").addEventListener("click", closeModal);
+$("#modalClose").addEventListener("click", closeModal);
+document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && !$("#modalRoot").classList.contains("hidden")) closeModal(); });
+
 
 function openConfirm(title, message, confirmText, onConfirm){
   const body = document.createElement("div");
-  body.innerHTML = `<div class="small">${escapeHtml(String(message)).replaceAll("\\n","<br>")}</div>`;
+  body.innerHTML = `<div class="small">${String(message).replaceAll("
+","<br>")}</div>`;
   const foot = document.createElement("div");
 
   const cancel = document.createElement("button");
@@ -116,7 +118,7 @@ function openConfirm(title, message, confirmText, onConfirm){
 
   const ok = document.createElement("button");
   ok.className = "btn";
-  ok.innerHTML = `<span class="danger">${escapeHtml(confirmText)}</span>`;
+  ok.innerHTML = `<span class="danger">${confirmText}</span>`;
   ok.onclick = () => {
     try { onConfirm(); } finally { closeModal(); }
   };
@@ -148,6 +150,33 @@ function teamById(divId, teamId){
 }
 
 // ---------- Standings ----------
+function computeStandingsInSeason(season, divId){
+  const div = season.divisions.find(d=>d.id===divId);
+  if(!div) return [];
+  const matches = (season.scheduleByDiv?.[divId] || []);
+  const table = new Map();
+  for(const t of div.teams){
+    table.set(t.id, {teamId:t.id, played:0,w:0,d:0,l:0,gf:0,ga:0,gd:0,pts:0});
+  }
+  const done = matches.filter(m=>m.homeScore!=null && m.awayScore!=null);
+  for(const m of done){
+    const home = table.get(m.homeId); const away = table.get(m.awayId);
+    if(!home || !away) continue;
+    home.played++; away.played++;
+    home.gf += m.homeScore; home.ga += m.awayScore;
+    away.gf += m.awayScore; away.ga += m.homeScore;
+    if(m.homeScore>m.awayScore){ home.w++; away.l++; home.pts+=3; }
+    else if(m.homeScore<m.awayScore){ away.w++; home.l++; away.pts+=3; }
+    else { home.d++; away.d++; home.pts+=1; away.pts+=1; }
+  }
+  for(const r of table.values()){ r.gd = r.gf - r.ga; }
+
+  const rows = Array.from(table.values());
+  rows.sort((a,b)=> (b.pts-a.pts) || (b.gd-a.gd) || (b.gf-a.gf) || (a.ga-b.ga) || ((findTeamInSeason(season,a.teamId)?.name||"").localeCompare(findTeamInSeason(season,b.teamId)?.name||"")));
+  rows.forEach((r,i)=> r.rank=i+1);
+  return rows;
+}
+
 function computeStandings(divId){
   const season = getActiveSeason();
   const div = getDivById(divId);
@@ -207,6 +236,7 @@ function getRankArrow(divId, teamId, newRank){
   if(newRank > prev) return { type:"down", glyph:"▾" };
   return { type:"flat", glyph:"▸" };
 }
+
 function commitLastRanks(divId, standingsRows){
   const season = getActiveSeason();
   season.lastRankByDivTeam[divId] = season.lastRankByDivTeam[divId] || {};
@@ -360,6 +390,7 @@ function render(){
 }
 
 function renderStandings(){
+  const season = getActiveSeason();
   const div = getActiveDiv();
   const body = $("#standingsBody");
   body.innerHTML = "";
@@ -381,7 +412,6 @@ function renderStandings(){
     const pill = document.createElement("div");
     pill.className = "teamPill";
     pill.onclick = () => openTeamModal(div.id, r.teamId);
-
     const logo = document.createElement("div");
     logo.className = "teamLogo";
     if(team?.logoDataUrl){
@@ -397,15 +427,16 @@ function renderStandings(){
     pill.appendChild(name);
     teamCell.appendChild(pill);
 
-    const formTd = document.createElement("td");
-    const dots = document.createElement("div");
-    dots.className = "formDots";
+        const formTd = document.createElement("td");
+    const marks = document.createElement("div");
+    marks.className = "formDots";
     for(const d of last5Dots(div.id, r.teamId)){
-      const dot = document.createElement("div");
-      dot.className = "dot " + (d==="W" ? "dot--win" : d==="D" ? "dot--draw" : d==="L" ? "dot--loss" : "dot--pending");
-      dots.appendChild(dot);
+      const m = document.createElement("span");
+      m.className = "formMark " + (d==="W" ? "formMark--win" : d==="D" ? "formMark--draw" : d==="L" ? "formMark--loss" : "formMark--pending");
+      m.textContent = (d==="W" || d==="D" || d==="L") ? "○" : "";
+      marks.appendChild(m);
     }
-    formTd.appendChild(dots);
+    formTd.appendChild(marks);
 
     tr.innerHTML = `
       <td class="col-rank">
@@ -430,6 +461,7 @@ function renderStandings(){
     body.appendChild(tr);
   }
 
+  // update last ranks after render (so arrows compare to previous render)
   commitLastRanks(div.id, rows);
   saveState();
 }
@@ -474,11 +506,11 @@ function renderSchedule(){
 
     item.innerHTML = `
       <div class="item__side">
-        <div class="item__team">${escapeHtml(home?.name || "Home")}</div>
+        <div class="item__team">${home?.name || "Home"}</div>
       </div>
-      <div class="badge"><span class="item__score">${escapeHtml(scoreText)}</span></div>
+      <div class="badge"><span class="item__score">${scoreText}</span></div>
       <div class="item__side right">
-        <div class="item__team">${escapeHtml(away?.name || "Away")}</div>
+        <div class="item__team">${away?.name || "Away"}</div>
         <button class="item__btn">入力</button>
       </div>
     `;
@@ -517,11 +549,11 @@ function renderResults(){
     item.className = "item";
     item.innerHTML = `
       <div class="item__side">
-        <div class="item__team">${escapeHtml(home?.name || "Home")}</div>
+        <div class="item__team">${home?.name || "Home"}</div>
       </div>
       <div class="badge"><span class="item__score">${m.homeScore} - ${m.awayScore}</span></div>
       <div class="item__side right">
-        <div class="item__team">${escapeHtml(away?.name || "Away")}</div>
+        <div class="item__team">${away?.name || "Away"}</div>
         <button class="item__btn">編集</button>
       </div>
     `;
@@ -530,7 +562,7 @@ function renderResults(){
   }
 }
 
-// ---------- Result Modal ----------
+// ---------- Modals: Result ----------
 function openResultModal(divId, matchId){
   const season = getActiveSeason();
   const div = getDivById(divId);
@@ -543,15 +575,15 @@ function openResultModal(divId, matchId){
 
   const body = document.createElement("div");
   body.innerHTML = `
-    <div class="small">${escapeHtml(div.name)} 第${m.round}節</div>
+    <div class="small">${div.name} 第${m.round}節</div>
     <div class="hr"></div>
     <div class="grid2">
       <div class="field">
-        <div class="label">${escapeHtml(home?.name || "Home")}</div>
+        <div class="label">${home?.name || "Home"}</div>
         <input class="input" id="homeScore" inputmode="numeric" pattern="[0-9]*" placeholder="0" value="${m.homeScore ?? ""}">
       </div>
       <div class="field">
-        <div class="label">${escapeHtml(away?.name || "Away")}</div>
+        <div class="label">${away?.name || "Away"}</div>
         <input class="input" id="awayScore" inputmode="numeric" pattern="[0-9]*" placeholder="0" value="${m.awayScore ?? ""}">
       </div>
     </div>
@@ -595,131 +627,147 @@ function openResultModal(divId, matchId){
   openModal("結果入力", body, foot);
 }
 
-// ---------- Team Modal ----------
+// ---------- Modals: Team ----------
+
 function openTeamModal(divId, teamId){
-  const div = getDivById(divId);
-  const team = teamById(divId, teamId);
-  if(!team) return;
+  const league = getActiveLeague();
+  const activeSeason = getActiveSeason();
+  const teamNow = teamById(divId, teamId) || findTeamInSeason(activeSeason, teamId);
+  if(!teamNow) return;
 
-  const season = getActiveSeason();
-  const matches = (season.scheduleByDiv[divId] || []).slice()
-    .filter(m => m.homeId===teamId || m.awayId===teamId)
-    .sort((a,b)=> (b.round-a.round) || (b.createdAt-a.createdAt));
+  const seasons = league.seasons.slice().sort((a,b)=>b.number-a.number);
 
-  let w=0,d=0,l=0,gf=0,ga=0,pts=0,played=0;
-  for(const m of matches){
-    if(m.homeScore==null || m.awayScore==null) continue;
-    played++;
-    const isHome = m.homeId===teamId;
-    const f = isHome ? m.homeScore : m.awayScore;
-    const a = isHome ? m.awayScore : m.homeScore;
-    gf += f; ga += a;
-    if(f>a){ w++; pts+=3; }
-    else if(f<a){ l++; }
-    else { d++; pts+=1; }
+  // compute season summaries for this team
+  const summaries = [];
+  for(const s of seasons){
+    // find division containing this team in that season
+    const d = s.divisions.find(x => (x.teams||[]).some(t=>t.id===teamId));
+    if(!d) continue;
+    const rows = computeStandingsInSeason(s, d.id);
+    const row = rows.find(r=>r.teamId===teamId);
+    if(!row) continue;
+    const wr = row.played ? (row.w/row.played*100) : 0;
+    summaries.push({
+      seasonNo: s.number,
+      seasonId: s.id,
+      divName: d.name,
+      rank: row.rank,
+      pts: row.pts,
+      played: row.played,
+      w: row.w, d: row.d, l: row.l,
+      gf: row.gf, ga: row.ga, gd: row.gd,
+      winrate: wr
+    });
   }
 
   const body = document.createElement("div");
+
+  // big header like your screenshot vibe
   body.innerHTML = `
-    <div class="grid2">
-      <div>
-        <div class="field">
-          <div class="label">チーム名</div>
-          <input class="input" id="teamName" value="${escapeHtml(team.name)}">
-        </div>
-
-        <div class="field">
-          <div class="label">ロゴ（画像）</div>
-          <input class="input" id="teamLogoFile" type="file" accept="image/*">
-          <div class="small">※アップするとブラウザ内に保存（ローカルストレージ）</div>
-        </div>
-
-        <div class="hr"></div>
-
-        <div class="small">戦績: ${played}試合 / ${w}勝 ${d}分 ${l}敗 / 勝点 ${pts} / 得失 ${gf}-${ga} (差 ${gf-ga})</div>
-      </div>
-
-      <div>
-        <div class="label">このチームの試合</div>
-        <div id="teamMatchList"></div>
+    <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px">
+      <div id="bigLogo" style="width:90px;height:90px;border-radius:22px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);overflow:hidden;display:grid;place-items:center"></div>
+      <div style="min-width:0">
+        <div style="font-size:18px;font-weight:500;line-height:1.1">${escapeHtml(teamNow.name)}</div>
+        <div class="small">現在のリーグ: ${escapeHtml(league.name)}</div>
+        <div class="small muted2">※Seasonが変わっても、このクラブの過去戦績をここで見れます</div>
       </div>
     </div>
+
+    <div class="field">
+      <div class="label">クラブ情報（コメント）</div>
+      <textarea class="input" id="teamNote" rows="4" placeholder="クラブ情報/メモ">${escapeHtml(teamNow.note || "")}</textarea>
+      <div class="small muted2">Viewerは編集できません（管理ロック解除が必要）</div>
+    </div>
+
+    <div class="label">シーズン別戦績</div>
+    <div id="seasonTable"></div>
+
+    <div class="hr"></div>
+    <div class="small muted2">試合の詳細は「日程/結果」側で確認・入力できます。</div>
   `;
 
-  const list = $("#teamMatchList", body);
-  if(matches.length===0){
-    const p = document.createElement("div");
-    p.className="small";
-    p.textContent="日程がまだありません。";
-    list.appendChild(p);
+  // logo
+  const big = $("#bigLogo", body);
+  if(teamNow.logoDataUrl){
+    const img = document.createElement("img");
+    img.src = teamNow.logoDataUrl;
+    img.style.width="100%"; img.style.height="100%"; img.style.objectFit="cover";
+    big.appendChild(img);
   }else{
-    for(const m of matches.slice(0, 14)){
-      const home = teamById(divId, m.homeId);
-      const away = teamById(divId, m.awayId);
-      const score = (m.homeScore==null||m.awayScore==null) ? "未" : `${m.homeScore}-${m.awayScore}`;
-      const row = document.createElement("div");
-      row.className = "rowLine";
-      row.innerHTML = `
-        <div class="rowLineLeft">
-          <div class="small">${escapeHtml(div.name)} 第${m.round}節</div>
-          <div class="small">${escapeHtml(home?.name || "Home")} vs ${escapeHtml(away?.name || "Away")}</div>
-        </div>
-        <div class="pill">${escapeHtml(score)}</div>
-      `;
-      row.onclick = ()=> openResultModal(divId, m.id);
-      list.appendChild(row);
-    }
+    big.innerHTML = `<div class="muted2" style="font-weight:500;font-size:22px">⚑</div>`;
   }
 
+  // season table
+  const tbl = document.createElement("table");
+  tbl.className="table";
+  tbl.innerHTML = `
+    <thead>
+      <tr>
+        <th style="text-align:left">Season</th>
+        <th style="text-align:left">Div</th>
+        <th>順位</th>
+        <th>勝点</th>
+        <th>試合</th>
+        <th>勝</th>
+        <th>分</th>
+        <th>負</th>
+        <th>得失点</th>
+        <th>勝率</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const tb = tbl.querySelector("tbody");
+  for(const s of summaries){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td style="text-align:left">Season ${s.seasonNo}</td>
+      <td style="text-align:left">${escapeHtml(s.divName)}</td>
+      <td>${s.rank}</td>
+      <td>${s.pts}</td>
+      <td>${s.played}</td>
+      <td>${s.w}</td>
+      <td>${s.d}</td>
+      <td>${s.l}</td>
+      <td>${s.gf}-${s.ga} (${s.gd})</td>
+      <td>${s.winrate.toFixed(1)}%</td>
+    `;
+    tb.appendChild(tr);
+  }
+  const wrap = $("#seasonTable", body);
+  wrap.appendChild(tbl);
+
+  // lock note editing
+  const noteEl = $("#teamNote", body);
+  noteEl.disabled = !isAdminUnlocked();
+
   const foot = document.createElement("div");
+  const close = document.createElement("button");
+  close.className="btn btn--ghost";
+  close.textContent="閉じる";
+  close.onclick=closeModal;
 
-  const btnClose = document.createElement("button");
-  btnClose.className = "btn btn--ghost";
-  btnClose.textContent = "閉じる";
-  btnClose.onclick = closeModal;
-
-  const btnDelete = document.createElement("button");
-  btnDelete.className = "btn btn--ghost";
-  btnDelete.innerHTML = `<span class="danger">チーム削除</span>`;
-  btnDelete.onclick = () => {
-    if(div.teams.length<=2){ toast("最低2チーム必要"); return; }
-    div.teams = div.teams.filter(t=>t.id!==teamId);
-    const season = getActiveSeason();
-    season.scheduleByDiv[divId] = (season.scheduleByDiv[divId] || []).filter(m => m.homeId!==teamId && m.awayId!==teamId);
-    if(season.lastRankByDivTeam?.[divId]) delete season.lastRankByDivTeam[divId][teamId];
-    saveState();
-    closeModal();
-    render();
-    toast("削除しました");
-  };
-
-  const btnSave = document.createElement("button");
-  btnSave.className = "btn";
-  btnSave.textContent = "保存";
-  btnSave.onclick = async () => {
-    const name = $("#teamName", body).value.trim();
-    if(!name){ toast("チーム名を入力"); return; }
-    team.name = name;
-
-    const fileInput = $("#teamLogoFile", body);
-    if(fileInput.files && fileInput.files[0]){
-      team.logoDataUrl = await fileToDataUrl(fileInput.files[0]);
-    }
-
+  const save = document.createElement("button");
+  save.className="btn";
+  save.textContent="保存";
+  save.onclick=()=>{
+    if(!isAdminUnlocked()){ toast("管理ロック解除が必要です"); return; }
+    // Update note on the team object in current season (team id is shared across seasons)
+    const t = findTeamInSeason(activeSeason, teamId);
+    if(t) t.note = noteEl.value;
     saveState();
     render();
     closeModal();
     toast("保存しました");
   };
 
-  foot.appendChild(btnClose);
-  foot.appendChild(btnDelete);
-  foot.appendChild(btnSave);
-
-  openModal("チーム", body, foot);
+  foot.appendChild(close);
+  foot.appendChild(save);
+  openModal("クラブ", body, foot);
 }
 
-// ---------- Rank Colors Modal ----------
+
+// ---------- Modals: Rank Colors ----------
 function openRankColorModal(){
   const season = getActiveSeason();
   const div = getActiveDiv();
@@ -745,7 +793,7 @@ function openRankColorModal(){
       row.className="rowLine";
       row.innerHTML = `
         <div class="rowLineLeft" style="flex:1">
-          <div class="colorChip" style="background:${escapeHtml(r.color)}"></div>
+          <div class="colorChip" style="background:${r.color}"></div>
           <div style="min-width:0">
             <div class="small">順位 ${r.from} - ${r.to}</div>
             <div class="small muted2">${escapeHtml(r.label || "")}</div>
@@ -789,7 +837,7 @@ function openRankColorModal(){
         </div>
         <div class="field">
           <div class="label">Color</div>
-          <input class="input" id="color" type="color" value="${escapeHtml(rule.color)}">
+          <input class="input" id="color" type="color" value="${rule.color}">
         </div>
       </div>
       <div class="field">
@@ -842,12 +890,15 @@ function openRankColorModal(){
   openModal("順位カラー", body, foot);
 }
 
-// ---------- Manage Modal ----------
+// ---------- Modals: Manage ----------
 function openManageModal(){
   const league = getActiveLeague();
+  const season = getActiveSeason();
+  const div = getActiveDiv();
 
   const body = document.createElement("div");
 
+  // league
   const leagueBox = document.createElement("div");
   leagueBox.innerHTML = `
     <div class="label">リーグ</div>
@@ -888,7 +939,6 @@ function openManageModal(){
       };
       leagueSwitchRow.appendChild(p);
     }
-
     const add = document.createElement("div");
     add.className = "pill";
     add.textContent = "+ リーグ追加";
@@ -899,7 +949,7 @@ function openManageModal(){
       const newLeague = {
         id,
         name: `New League`,
-        logoDataUrl: "",
+        logoDataUrl: "", note: "",
         seasons: [{
           id: seasonId,
           number: 1,
@@ -907,7 +957,7 @@ function openManageModal(){
           divisions: [{
             id: divId,
             name: "Div.1",
-            teams: [{ id: uid(), name:"Team A", logoDataUrl:"" }, { id: uid(), name:"Team B", logoDataUrl:"" }]
+            teams: [{ id: uid(), name:"Team A", logoDataUrl:"",note:"" }, { id: uid(), name:"Team B", logoDataUrl:"",note:"" }]
           }],
           rankColorRules: { [divId]: [] },
           scheduleByDiv: {},
@@ -927,13 +977,14 @@ function openManageModal(){
     };
     leagueSwitchRow.appendChild(add);
 
-    if(state.leagues.length > 1){
+    if(state.leagues.length>1){
       const del = document.createElement("div");
-      del.className = "pill";
+      del.className="pill";
       del.innerHTML = `<span class="danger">リーグ削除</span>`;
       del.onclick = ()=> {
         const idx = state.leagues.findIndex(x=>x.id===league.id);
-        state.leagues.splice(idx, 1);
+        state.leagues.splice(idx,1);
+        // switch to first
         state.ui.activeLeagueId = state.leagues[0].id;
         const ls = getActiveLeague();
         state.ui.activeSeasonId = ls.seasons[ls.seasons.length-1].id;
@@ -950,11 +1001,12 @@ function openManageModal(){
   }
   renderLeagueSwitch();
 
+  // seasons switch
   const seasonBox = document.createElement("div");
   seasonBox.innerHTML = `
     <div class="label">シーズン</div>
     <div class="pillRow" id="seasonRow"></div>
-    <div class="small">※「✕」でシーズン削除（最後の1つは削除不可）</div>
+    <div class="small">※過去シーズンも保持されます</div>
     <div class="hr"></div>
   `;
   body.appendChild(seasonBox);
@@ -964,69 +1016,11 @@ function openManageModal(){
     seasonRow.innerHTML = "";
     const league = getActiveLeague();
     const seasons = league.seasons.slice().sort((a,b)=>a.number-b.number);
-    const canDelete = seasons.length > 1;
-
     for(const s of seasons){
-      const pill = document.createElement("div");
-      pill.className = "pill" + (s.id===state.ui.activeSeasonId ? " pill--active" : "");
-      pill.style.display = "inline-flex";
-      pill.style.alignItems = "center";
-      pill.style.gap = "8px";
-
-      const t = document.createElement("span");
-      t.textContent = `Season ${s.number}`;
-      pill.appendChild(t);
-
-      if(canDelete){
-        const x = document.createElement("span");
-        x.textContent = "✕";
-        x.title = "このSeasonを削除";
-        x.style.display = "inline-grid";
-        x.style.placeItems = "center";
-        x.style.width = "22px";
-        x.style.height = "22px";
-        x.style.borderRadius = "10px";
-        x.style.border = "1px solid rgba(255,255,255,.12)";
-        x.style.background = "rgba(255,255,255,.04)";
-        x.style.color = "#ff7b7b";
-        x.style.fontWeight = "500";
-        x.style.cursor = "pointer";
-
-        x.onclick = (ev)=> {
-          ev.stopPropagation();
-          openConfirm(
-            "シーズン削除",
-            `Season ${s.number} を削除します。日程・結果・順位など、このシーズンのデータは全て消えます。\n本当に削除しますか？`,
-            "削除する",
-            ()=> {
-              const league = getActiveLeague();
-              if(league.seasons.length <= 1){ toast("最後のシーズンは削除できません"); return; }
-
-              const deletingId = s.id;
-              const sorted = league.seasons.slice().sort((a,b)=>a.number-b.number);
-              const idx = sorted.findIndex(ss=>ss.id===deletingId);
-
-              league.seasons = league.seasons.filter(ss=>ss.id!==deletingId);
-
-              if(state.ui.activeSeasonId === deletingId){
-                const after = league.seasons.slice().sort((a,b)=>a.number-b.number);
-                const next = after[Math.max(0, Math.min(after.length-1, idx-1))] || after[after.length-1];
-                state.ui.activeSeasonId = next.id;
-                state.ui.activeDivId = next.divisions[0]?.id;
-                state.ui.scheduleRound = 1;
-              }
-
-              saveState();
-              render();
-              setTimeout(()=>{ try{ openManageModal(); }catch{} }, 0);
-              toast("シーズンを削除しました");
-            }
-          );
-        };
-        pill.appendChild(x);
-      }
-
-      pill.onclick = ()=> {
+      const p = document.createElement("div");
+      p.className = "pill" + (s.id===state.ui.activeSeasonId ? " pill--active" : "");
+      p.textContent = `Season ${s.number}`;
+      p.onclick = ()=> {
         state.ui.activeSeasonId = s.id;
         state.ui.activeDivId = s.divisions[0]?.id;
         state.ui.scheduleRound = 1;
@@ -1035,18 +1029,59 @@ function openManageModal(){
         render();
         openManageModal();
       };
-
-      seasonRow.appendChild(pill);
+      seasonRow.appendChild(p);
     }
-
+    
     const add = document.createElement("div");
     add.className="pill";
     add.textContent = "+ 新シーズン";
     add.onclick = ()=> { createNewSeason(); closeModal(); render(); openManageModal(); };
     seasonRow.appendChild(add);
+
+    if(seasons.length > 1){
+      const del = document.createElement("div");
+      del.className = "pill";
+      del.innerHTML = "<span class=\"danger\">シーズン削除</span>";
+      del.onclick = ()=> {
+        const body = document.createElement("div");
+        body.innerHTML = `
+          <div class="small danger">このシーズンを削除します。</div>
+          <div class="small">日程・結果・順位など全データが完全に消えます。</div>
+          <div class="small">※この操作は取り消せません。</div>
+        `;
+        const foot = document.createElement("div");
+        const cancel = document.createElement("button");
+        cancel.className="btn btn--ghost";
+        cancel.textContent="キャンセル";
+        cancel.onclick=closeModal;
+
+        const ok = document.createElement("button");
+        ok.className="btn";
+        ok.textContent="削除する";
+        ok.onclick=()=>{
+          const idx = league.seasons.findIndex(s=>s.id===state.ui.activeSeasonId);
+          league.seasons.splice(idx,1);
+          const last = league.seasons[league.seasons.length-1];
+          state.ui.activeSeasonId = last.id;
+          state.ui.activeDivId = last.divisions[0]?.id;
+          state.ui.scheduleRound = 1;
+          saveState();
+          closeModal();
+          render();
+          toast("シーズンを削除しました");
+        };
+
+        foot.appendChild(cancel);
+        foot.appendChild(ok);
+        openModal("シーズン削除確認", body, foot);
+      };
+      seasonRow.appendChild(del);
+    }
+
   }
   renderSeasonRow();
 
+  // divisions
   const divBox = document.createElement("div");
   divBox.innerHTML = `
     <div class="label">ディビジョン</div>
@@ -1057,6 +1092,7 @@ function openManageModal(){
   body.appendChild(divBox);
 
   const divList = $("#divList", divBox);
+
   function renderDivList(){
     const season = getActiveSeason();
     divList.innerHTML = "";
@@ -1077,9 +1113,8 @@ function openManageModal(){
         if(season.divisions.length<=1){ toast("最低1ディビジョン必要"); return; }
         season.divisions = season.divisions.filter(x=>x.id!==d.id);
         delete season.scheduleByDiv[d.id];
-        if(season.rankColorRules) delete season.rankColorRules[d.id];
-        if(season.lastRankByDivTeam) delete season.lastRankByDivTeam[d.id];
-
+        delete season.rankColorRules?.[d.id];
+        delete season.lastRankByDivTeam?.[d.id];
         if(state.ui.activeDivId === d.id){
           state.ui.activeDivId = season.divisions[0].id;
           state.ui.scheduleRound = 1;
@@ -1095,7 +1130,7 @@ function openManageModal(){
   $("#btnAddDiv", divBox).onclick = ()=> {
     const season = getActiveSeason();
     const newId = uid();
-    const d = { id:newId, name:`Div.${season.divisions.length+1}`, teams:[{id:uid(),name:"Team A",logoDataUrl:""},{id:uid(),name:"Team B",logoDataUrl:""}] };
+    const d = { id:newId, name:`Div.${season.divisions.length+1}`, logoDataUrl:"", teams:[{id:uid(),name:"Team A",logoDataUrl:"",note:""},{id:uid(),name:"Team B",logoDataUrl:"",note:""}] };
     season.divisions.push(d);
     season.rankColorRules = season.rankColorRules || {};
     season.rankColorRules[newId] = [];
@@ -1103,6 +1138,7 @@ function openManageModal(){
     toast("追加しました");
   };
 
+  // footer
   const foot = document.createElement("div");
 
   const btnClose = document.createElement("button");
@@ -1114,7 +1150,6 @@ function openManageModal(){
   btnSave.className="btn";
   btnSave.textContent="保存";
   btnSave.onclick = async ()=> {
-    const league = getActiveLeague();
     league.name = $("#leagueNameInput", leagueBox).value.trim() || league.name;
 
     const fileInput = $("#leagueLogoFile", leagueBox);
@@ -1180,7 +1215,7 @@ function openDivisionEditModal(divId){
   renderTeamList();
 
   $("#btnAddTeam", body).onclick = ()=> {
-    div.teams.push({ id: uid(), name:`Team ${div.teams.length+1}`, logoDataUrl:"" });
+    div.teams.push({ id: uid(), name:`Team ${div.teams.length+1}`, logoDataUrl:"",note:"" });
     saveState(); render(); renderTeamList();
     toast("追加しました");
   };
@@ -1196,6 +1231,7 @@ function openDivisionEditModal(divId){
   btnSave.textContent="保存";
   btnSave.onclick = ()=> {
     div.name = $("#divName", body).value.trim() || div.name;
+    // if active div changed name, update UI
     saveState(); render();
     closeModal(); openManageModal();
     toast("保存しました");
@@ -1213,6 +1249,7 @@ function createNewSeason(){
   const current = getActiveSeason();
   const nextNumber = Math.max(...league.seasons.map(s=>s.number)) + 1;
 
+  // copy league structure (divisions + teams), reset schedule & history
   const newSeason = {
     id: uid(),
     number: nextNumber,
@@ -1293,6 +1330,17 @@ function openGenerateScheduleModal(){
 }
 
 // ---------- Utils ----------
+function findTeamInSeason(season, teamId){
+  for(const d of season.divisions){
+    const t = (d.teams||[]).find(x=>x.id===teamId);
+    if(t) return t;
+  }
+  return null;
+}
+
+let _adminUnlockedUntil = 0;
+function isAdminUnlocked(){ return Date.now() < _adminUnlockedUntil; }
+
 function escapeHtml(str){
   return String(str)
     .replaceAll("&","&amp;")
@@ -1301,6 +1349,7 @@ function escapeHtml(str){
     .replaceAll('"',"&quot;")
     .replaceAll("'","&#39;");
 }
+
 function fileToDataUrl(file){
   return new Promise((resolve, reject)=>{
     const reader = new FileReader();
@@ -1310,81 +1359,255 @@ function fileToDataUrl(file){
   });
 }
 
-// ---------- Wire up ----------
-function wire(){
-  // modal backdrop/close
-  $("#modalBack")?.addEventListener("click", closeModal);
-  $("#modalClose")?.addEventListener("click", closeModal);
-  document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && !$("#modalRoot").classList.contains("hidden")) closeModal(); });
 
-  $("#btnManage").onclick = openManageModal;
-  $("#btnNewSeason").onclick = ()=>{ createNewSeason(); render(); };
-  $("#btnPrevSeason").onclick = ()=> gotoSeason(-1);
-  $("#btnNextSeason").onclick = ()=> gotoSeason(1);
+function openAdminLockModal(){
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <div class="small">管理者のみ編集できます。パスワードを入力してください。</div>
+    <div class="hr"></div>
+    <div class="field">
+      <div class="label">管理者パスワード</div>
+      <input class="input" id="adminPw" type="password" placeholder="password">
+    </div>
+    <div class="small muted2">※この版はブラウザ内ロックです（後でFirebase版に移行できます）</div>
+  `;
+  const foot = document.createElement("div");
+  const cancel = document.createElement("button");
+  cancel.className="btn btn--ghost";
+  cancel.textContent="キャンセル";
+  cancel.onclick=closeModal;
 
-  $("#btnRankColors").onclick = openRankColorModal;
-  $("#btnGenerateSchedule").onclick = openGenerateScheduleModal;
-
-  $("#btnRoundPrev").onclick = ()=>{ state.ui.scheduleRound = Math.max(1, (state.ui.scheduleRound||1)-1); saveState(); renderSchedule(); };
-  $("#btnRoundNext").onclick = ()=>{
-    const season = getActiveSeason();
-    const div = getActiveDiv();
-    const matches = season.scheduleByDiv[div.id] || [];
-    const maxRound = matches.length ? Math.max(...matches.map(m=>m.round)) : 1;
-    state.ui.scheduleRound = Math.min(maxRound, (state.ui.scheduleRound||1)+1);
-    saveState(); renderSchedule();
-  };
-
-  $("#btnShowAllResults").onclick = ()=>{
-    const season = getActiveSeason();
-    const div = getActiveDiv();
-    const matches = (season.scheduleByDiv[div.id] || []).slice()
-      .sort((a,b)=> (b.round-a.round) || (b.createdAt-a.createdAt));
-
-    const body = document.createElement("div");
-    const list = document.createElement("div");
-    body.appendChild(list);
-
-    const completed = matches.filter(m=>m.homeScore!=null && m.awayScore!=null);
-    if(completed.length===0){
-      const p = document.createElement("div");
-      p.className="small";
-      p.textContent="結果がまだありません。";
-      list.appendChild(p);
+  const ok = document.createElement("button");
+  ok.className="btn";
+  ok.textContent="解除";
+  ok.onclick=()=>{
+    const pw = $("#adminPw", body).value;
+    if(pw === "admin"){ // 変更したければここを編集
+      _adminUnlockedUntil = Date.now() + 12*60*60*1000; // 12h
+      closeModal();
+      applyAdminUI();
+      toast("管理ロックを解除しました");
     }else{
-      for(const m of completed){
-        const home = teamById(div.id, m.homeId);
-        const away = teamById(div.id, m.awayId);
-        const row = document.createElement("div");
-        row.className="rowLine";
-        row.innerHTML = `
-          <div class="rowLineLeft" style="flex:1">
-            <div class="small">${escapeHtml(div.name)} 第${m.round}節</div>
-            <div class="small">${escapeHtml(home?.name || "Home")} vs ${escapeHtml(away?.name || "Away")}</div>
-          </div>
-          <div class="pill">${m.homeScore}-${m.awayScore}</div>
-        `;
-        row.onclick = ()=> openResultModal(div.id, m.id);
-        list.appendChild(row);
+      toast("パスワードが違います");
+    }
+  };
+  foot.appendChild(cancel);
+  foot.appendChild(ok);
+  openModal("管理ロック", body, foot);
+}
+
+function applyAdminUI(){
+  const enabled = isAdminUnlocked();
+  const ids = ["btnManage","btnNewSeason","btnRankColors","btnGenerateSchedule"];
+  for(const id of ids){
+    const el = document.getElementById(id);
+    if(el) el.disabled = !enabled;
+  }
+}
+
+function openSeasonEndModal(){
+  if(!isAdminUnlocked()){ toast("管理ロック解除が必要です"); return; }
+  const league = getActiveLeague();
+  const season = getActiveSeason();
+
+  // divisions order by name like Div.1, Div.2 ...
+  const divs = season.divisions.slice();
+  const divIndex = new Map(divs.map((d,i)=>[d.id,i]));
+
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <div class="small">このシーズンを終了して、次シーズンを作成します。</div>
+    <div class="small muted2">昇格/降格/入れ替え戦は「順位カラー」の名前で判定します（例: 昇格 / 降格 / 入れ替え戦）。</div>
+    <div class="hr"></div>
+    <div class="label">入れ替え戦（勝者の行き先を選択）</div>
+    <div id="playoffWrap"></div>
+  `;
+
+  // build standings once
+  const standingsByDiv = {};
+  for(const d of divs){
+    standingsByDiv[d.id] = computeStandingsInSeason(season, d.id);
+  }
+
+  // derive movements by label keyword
+  const autoMoves = []; // {teamId, fromDivId, toDivId}
+  const playoffs = [];  // {teamId, fromDivId, upDivId, downDivId}
+  for(const d of divs){
+    const rules = (season.rankColorRules?.[d.id] || []);
+    const rows = standingsByDiv[d.id];
+    for(const row of rows){
+      const rule = rules.find(r => row.rank>=Number(r.from) && row.rank<=Number(r.to) && r.label);
+      if(!rule) continue;
+      const label = String(rule.label||"");
+      const idx = divIndex.get(d.id);
+      if(label.includes("昇格") && idx>0){
+        autoMoves.push({teamId: row.teamId, fromDivId: d.id, toDivId: divs[idx-1].id});
+      }else if(label.includes("降格") && idx<divs.length-1){
+        autoMoves.push({teamId: row.teamId, fromDivId: d.id, toDivId: divs[idx+1].id});
+      }else if(label.includes("入れ替") && idx<divs.length-1){
+        playoffs.push({teamId: row.teamId, fromDivId: d.id, upDivId: idx>0?divs[idx-1].id:"", downDivId: divs[idx+1].id});
       }
     }
+  }
 
-    const foot = document.createElement("div");
-    const close = document.createElement("button");
-    close.className="btn";
-    close.textContent="閉じる";
-    close.onclick=closeModal;
-    foot.appendChild(close);
+  const playoffWrap = $("#playoffWrap", body);
+  const playoffDecision = new Map(); // teamId -> destinationDivId
+  if(playoffs.length===0){
+    playoffWrap.innerHTML = `<div class="small">入れ替え戦対象がありません。</div>`;
+  }else{
+    for(const p of playoffs){
+      const from = divs.find(d=>d.id===p.fromDivId);
+      const up = p.upDivId ? divs.find(d=>d.id===p.upDivId) : null;
+      const down = p.downDivId ? divs.find(d=>d.id===p.downDivId) : null;
+      const t = findTeamInSeason(season, p.teamId);
+      const row = document.createElement("div");
+      row.className="rowLine";
+      row.innerHTML = `
+        <div class="rowLineLeft" style="flex:1;min-width:0">
+          <div class="small">${escapeHtml(t?.name||"")}（${escapeHtml(from?.name||"")}）</div>
+        </div>
+        <select class="select" style="max-width:220px"></select>
+      `;
+      const sel = row.querySelector("select");
+      if(up){
+        const o1 = document.createElement("option");
+        o1.value = up.id;
+        o1.textContent = `勝ち: ${up.name}（昇格）`;
+        sel.appendChild(o1);
+      }
+      if(down){
+        const o2 = document.createElement("option");
+        o2.value = down.id;
+        o2.textContent = `負け: ${down.name}（降格/残留）`;
+        sel.appendChild(o2);
+      }
+      // default: stay/down
+      playoffDecision.set(p.teamId, down ? down.id : (from?.id||""));
+      sel.value = playoffDecision.get(p.teamId);
+      sel.onchange = ()=> playoffDecision.set(p.teamId, sel.value);
+      playoffWrap.appendChild(row);
+    }
+  }
 
-    openModal("全結果", body, foot);
+  const foot = document.createElement("div");
+  const cancel = document.createElement("button");
+  cancel.className="btn btn--ghost";
+  cancel.textContent="キャンセル";
+  cancel.onclick=closeModal;
+
+  const ok = document.createElement("button");
+  ok.className="btn";
+  ok.textContent="シーズン終了して次へ";
+  ok.onclick=()=>{
+    // Create next season
+    const nextNumber = Math.max(...league.seasons.map(s=>s.number)) + 1;
+    const newSeason = {
+      id: uid(),
+      number: nextNumber,
+      createdAt: Date.now(),
+      divisions: deepClone(season.divisions),
+      rankColorRules: deepClone(season.rankColorRules || {}),
+      scheduleByDiv: {},
+      lastRankByDivTeam: {},
+    };
+
+    function moveTeam(teamId, fromDivId, toDivId){
+      if(!toDivId || fromDivId===toDivId) return;
+      const from = newSeason.divisions.find(d=>d.id===fromDivId);
+      const to = newSeason.divisions.find(d=>d.id===toDivId);
+      if(!from || !to) return;
+      const idx = from.teams.findIndex(t=>t.id===teamId);
+      if(idx<0) return;
+      const [t] = from.teams.splice(idx,1);
+      if(!to.teams.some(x=>x.id===teamId)) to.teams.push(t);
+    }
+
+    for(const mv of autoMoves){
+      moveTeam(mv.teamId, mv.fromDivId, mv.toDivId);
+    }
+    for(const p of playoffs){
+      const dest = playoffDecision.get(p.teamId) || p.fromDivId;
+      moveTeam(p.teamId, p.fromDivId, dest);
+    }
+
+    league.seasons.push(newSeason);
+    state.ui.activeSeasonId = newSeason.id;
+    state.ui.activeDivId = newSeason.divisions[0]?.id;
+    state.ui.scheduleRound = 1;
+
+    saveState();
+    render();
+    closeModal();
+    toast(`Season ${nextNumber} を作成しました`);
   };
 
-  render();
+  foot.appendChild(cancel);
+  foot.appendChild(ok);
+  openModal("シーズン終了", body, foot);
 }
 
-// run after DOM
-if(document.readyState === "loading"){
-  document.addEventListener("DOMContentLoaded", wire);
-}else{
-  wire();
-}
+// ---------- Buttons ----------
+$("#btnManage").onclick = openManageModal;
+$("#btnNewSeason").onclick = ()=>{ createNewSeason(); render(); };
+$("#btnPrevSeason").onclick = ()=> gotoSeason(-1);
+$("#btnNextSeason").onclick = ()=> gotoSeason(1);
+
+$("#btnRankColors").onclick = openRankColorModal;
+$("#btnGenerateSchedule").onclick = openGenerateScheduleModal;
+
+$("#btnRoundPrev").onclick = ()=>{ state.ui.scheduleRound = Math.max(1, (state.ui.scheduleRound||1)-1); saveState(); renderSchedule(); };
+$("#btnRoundNext").onclick = ()=>{
+  const season = getActiveSeason();
+  const div = getActiveDiv();
+  const matches = season.scheduleByDiv[div.id] || [];
+  const maxRound = matches.length ? Math.max(...matches.map(m=>m.round)) : 1;
+  state.ui.scheduleRound = Math.min(maxRound, (state.ui.scheduleRound||1)+1);
+  saveState(); renderSchedule();
+};
+
+$("#btnShowAllResults").onclick = ()=>{
+  const season = getActiveSeason();
+  const div = getActiveDiv();
+  const matches = (season.scheduleByDiv[div.id] || []).slice()
+    .sort((a,b)=> (b.round-a.round) || (b.createdAt-a.createdAt));
+
+  const body = document.createElement("div");
+  const list = document.createElement("div");
+  body.appendChild(list);
+
+  const completed = matches.filter(m=>m.homeScore!=null && m.awayScore!=null);
+  if(completed.length===0){
+    const p = document.createElement("div");
+    p.className="small";
+    p.textContent="結果がまだありません。";
+    list.appendChild(p);
+  }else{
+    for(const m of completed){
+      const home = teamById(div.id, m.homeId);
+      const away = teamById(div.id, m.awayId);
+      const row = document.createElement("div");
+      row.className="rowLine";
+      row.innerHTML = `
+        <div class="rowLineLeft" style="flex:1">
+          <div class="small">${div.name} 第${m.round}節</div>
+          <div class="small">${home?.name || "Home"} vs ${away?.name || "Away"}</div>
+        </div>
+        <div class="pill">${m.homeScore}-${m.awayScore}</div>
+      `;
+      row.onclick = ()=> openResultModal(div.id, m.id);
+      list.appendChild(row);
+    }
+  }
+
+  const foot = document.createElement("div");
+  const close = document.createElement("button");
+  close.className="btn";
+  close.textContent="閉じる";
+  close.onclick=closeModal;
+  foot.appendChild(close);
+
+  openModal("全結果", body, foot);
+};
+
+// Initial render
+render();
